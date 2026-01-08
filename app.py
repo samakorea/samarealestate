@@ -210,10 +210,8 @@ def get_news_list(category="전체"):
     if category == "부동산":
         keyword = f"춘천 (부동산 OR 아파트 OR 주택 OR 분양 OR 매매 OR 토지) {noise}"
     else:
-        # 통합 뉴스: 부동산을 제외한 경제, 정치, 사회 전반
         keyword = f"춘천 -부동산 -아파트 {noise}"
 
-    # 일주일 전(7d)까지의 뉴스 수집
     query = f"{keyword} ({sites}) when:7d"
     rss_url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=ko&gl=KR&ceid=KR:ko"
     
@@ -240,7 +238,6 @@ def get_news_list(category="전체"):
                 'is_today': (date_str == today_str)
             })
 
-    # 최신 날짜 및 시간순 정렬 후 최대 50개 반환
     return sorted(news, key=lambda x: x['date_obj'], reverse=True)[:50]
 
 # -----------------------------------------------------------------------------
@@ -251,11 +248,18 @@ st.title("🏙️ 춘천 지역 통합 관제 시스템")
 # [사이드바]
 with st.sidebar:
     st.header("🔑 1. API 설정")
-    api_key = st.text_input("공공데이터포털 인증키(Decoding)", type="password")
+    
+    # ★ 수정된 부분: Secrets 금고에서 자동으로 키 가져오기
+    if "molit_key" in st.secrets:
+        api_key = st.secrets["molit_key"]
+        st.success("✅ 인증키가 자동 연결되었습니다.")
+    else:
+        api_key = st.text_input("공공데이터포털 인증키(Decoding)", type="password")
+        st.info("관리자 도구에서 Secrets를 설정하면 자동 로그인됩니다.")
+    
     st.divider()
     
     st.header("📌 2. 관심 아파트 추가")
-    st.caption("거래가 없어도 표에 고정됩니다.")
     with st.form("add_apt_form", clear_on_submit=True):
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -277,17 +281,15 @@ with st.sidebar:
             remove_my_apt(row['동'], row['아파트명'])
             st.rerun()
 
-# [메인 화면 필터]
+# [메인 화면]
 st.markdown("### 🔍 조회 지역 필터링")
 all_dongs = sorted(list(set(my_df['동'].unique().tolist() + CHUNCHEON_DONGS)))
 selected_dongs = st.multiselect("조회할 동네를 선택하세요:", all_dongs, default=["퇴계동", "온의동"])
 st.markdown("---")
 
-# [탭 구성]
 tab1, tab2, tab3 = st.tabs(["🏢 아파트 실거래", "⛰️ 토지 실거래", "📰 지역 뉴스(1주일치)"])
 
 with tab1:
-    st.markdown("#### 최근 6개월 아파트 거래 내역")
     if selected_dongs:
         data = get_apt_data_api(api_key)
         df_v = merge_data(data, my_df, selected_dongs)
@@ -304,21 +306,13 @@ with tab1:
             column_order=["계약일", "동", "아파트명", "면적", "국토부 실거래가", "kb_link", "naver_link"],
             hide_index=True, use_container_width=True
         )
-    else:
-        st.info("동네를 선택해주세요.")
 
 with tab2:
-    st.markdown("#### 최근 6개월 토지 거래 내역")
     if selected_dongs:
         l_data = get_land_data_api(api_key)
-        if l_data:
-            ldf = pd.DataFrame(l_data)
-            ldf = ldf[ldf['동'].isin(selected_dongs)].copy()
-        else: ldf = pd.DataFrame()
-        
-        if ldf.empty:
-            ldf = pd.DataFrame([{'계약일': '-', '동': selected_dongs[0], '아파트명': '-', '면적': '-', '국토부 실거래가': '-'}])
-        
+        ldf = pd.DataFrame(l_data) if l_data else pd.DataFrame()
+        if not ldf.empty: ldf = ldf[ldf['동'].isin(selected_dongs)].copy()
+        if ldf.empty: ldf = pd.DataFrame([{'계약일': '-', '동': selected_dongs[0], '아파트명': '-', '면적': '-', '국토부 실거래가': '-'}])
         ldf['kb_link'] = ldf.apply(lambda x: get_land_links(x['동'], x['아파트명'])['kb'], axis=1)
         ldf['naver_link'] = ldf.apply(lambda x: get_land_links(x['동'], x['아파트명'])['naver'], axis=1)
         st.dataframe(
@@ -335,25 +329,14 @@ with tab2:
 
 with tab3:
     st.subheader(f"📅 춘천 주요 소식 (최신순 50개)")
-    # 뉴스 세부 카테고리 탭 (부동산 / 일반 통합)
     nt1, nt2 = st.tabs(["🏠 부동산 뉴스", "📑 일반/통합 뉴스"])
-    
     def render_news(cat):
         items = get_news_list(cat)
         if items:
             for n in items:
                 badge = '<span class="badge-today">오늘</span>' if n['is_today'] else ''
-                st.markdown(f"""
-                    <div class="news-box">
-                        <a href="{n['link']}" target="_blank" class="news-title">{badge}{n['title']}</a>
-                        <div class="news-meta">{n['source']} | {n['date_str']}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info(f"최근 1주일간 '{cat}' 관련 최신 뉴스가 없습니다.")
-
+                st.markdown(f'<div class="news-box"><a href="{n["link"]}" target="_blank" class="news-title">{badge}{n["title"]}</a><div class="news-meta">{n["source"]} | {n["date_str"]}</div></div>', unsafe_allow_html=True)
+        else: st.info(f"최근 1주일간 '{cat}' 관련 최신 뉴스가 없습니다.")
     with nt1: render_news("부동산")
     with nt2: render_news("전체")
-    
-    if st.button("뉴스 새로고침"):
-        st.rerun()
+    if st.button("뉴스 새로고침"): st.rerun()
