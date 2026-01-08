@@ -10,6 +10,7 @@ import time
 import os
 from difflib import get_close_matches
 import re
+import altair as alt # 그래프 그리기용 라이브러리
 
 # -----------------------------------------------------------------------------
 # 1. 화면 디자인 및 설정
@@ -39,7 +40,7 @@ st.markdown("""
 
 CSV_FILE = "my_apts.csv"
 
-# ★ 지역별 설정 (원주 깔끔하게 정리 완료)
+# ★ 지역별 설정
 REGIONS = {
     "춘천시": {
         "code": "51110",
@@ -57,7 +58,8 @@ REGIONS = {
         "publishers": [
             {"name": "전체", "domain_key": "ALL"},
             {"name": "강원일보", "domain_key": "kwnews"},
-            {"name": "강원도민일보", "domain_key": "kado"}
+            {"name": "강원도민일보", "domain_key": "kado"},
+            {"name": "원주MBC", "domain_key": "wjmbc"}
         ]
     }
 }
@@ -149,7 +151,7 @@ def get_land_data_api(api_key, region_code):
     return all_data
 
 # -----------------------------------------------------------------------------
-# 4. 유틸리티
+# 4. 유틸리티 & 그래프
 # -----------------------------------------------------------------------------
 def get_links(region_name, dong, name, is_land=False):
     city = region_name[:2]
@@ -173,10 +175,8 @@ def get_interest_data(api_list, my_df, current_region):
                 '계약일': '-', '동': row['동'], '아파트명': row['아파트명'], 
                 '면적': None, '국토부 실거래가': None 
             })
-    
     df_final = pd.concat([df_interest, pd.DataFrame(dummy_rows)], ignore_index=True)
     if df_final.empty: return pd.DataFrame()
-    
     df_final['sort_date'] = df_final['계약일'].apply(lambda x: '9999-99-99' if x == '-' else x)
     return df_final.sort_values(by=['sort_date', '동'], ascending=[False, True]).drop(columns=['sort_date'])
 
@@ -185,6 +185,30 @@ def get_inferred_apt_name(api_data, input_name, input_dong):
     dong_apts = list(set([d['아파트명'] for d in api_data if d['동'] == input_dong]))
     matches = get_close_matches(input_name, dong_apts, n=1, cutoff=0.2)
     return matches[0] if matches else input_name
+
+# ★ 그래프 그리기 함수 (Altair 사용) ★
+def plot_apt_trend(df_apt):
+    if df_apt.empty:
+        st.info("데이터가 부족하여 그래프를 그릴 수 없습니다.")
+        return
+
+    # 날짜 형식 변환
+    df_apt = df_apt.copy()
+    df_apt['계약일'] = pd.to_datetime(df_apt['계약일'])
+    
+    # Altair 차트 생성
+    base = alt.Chart(df_apt).encode(
+        x=alt.X('계약일:T', title='계약일'),
+        y=alt.Y('국토부 실거래가:Q', title='거래금액(만원)', scale=alt.Scale(zero=False)),
+        tooltip=['계약일', '국토부 실거래가', '면적']
+    )
+    
+    # 선 그래프 + 점 그래프 결합
+    line = base.mark_line(color='#FF4B4B')
+    points = base.mark_circle(size=60, color='#FF4B4B')
+    
+    chart = (line + points).properties(height=300).interactive()
+    st.altair_chart(chart, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # 5. 네이버 뉴스 수집
@@ -230,25 +254,20 @@ def get_naver_news_list(client_id, client_secret, region_name, category, publish
     except: return []
 
 # -----------------------------------------------------------------------------
-# 6. 메인 UI (배포용 Secrets 자동 로드 적용)
+# 6. 메인 UI
 # -----------------------------------------------------------------------------
 st.title("🏔️ 강원도 부동산 통합 관제 시스템")
 
-# [배포용] Secrets 자동 로드 로직
-# st.secrets에 키가 있으면 사용하고, 없으면 사이드바 입력창을 띄움
 with st.sidebar:
     st.header("🔑 API 설정")
-    
-    # 1. 공공데이터 인증키
     if "public_api_key" in st.secrets:
         api_key_val = st.secrets["public_api_key"]
         st.success("✅ 공공데이터 키 자동 연결됨")
     else:
-        api_key_val = st.text_input("공공데이터 인증키(Decoding)", type="password", help="secrets.toml에 'public_api_key'로 저장하면 자동 로드됩니다.")
+        api_key_val = st.text_input("공공데이터 인증키(Decoding)", type="password")
     
     st.divider()
     
-    # 2. 네이버 API 키
     if "naver_client_id" in st.secrets and "naver_client_secret" in st.secrets:
         naver_id = st.secrets["naver_client_id"]
         naver_secret = st.secrets["naver_client_secret"]
@@ -274,10 +293,11 @@ def render_region_dashboard(region_name):
     r_dongs = REGIONS[region_name]["dongs"]
     r_pubs = REGIONS[region_name]["publishers"]
     
-    raw_for_infer = []
+    raw_data = []
     if api_key_val:
-        raw_for_infer = get_apt_data_api(api_key_val, r_code)
+        raw_data = get_apt_data_api(api_key_val, r_code)
 
+    # --- 사이드바 (관심 관리) ---
     with st.sidebar:
         with st.expander(f"📌 {region_name} 관심 아파트 관리", expanded=True):
             with st.form(f"add_apt_{region_name}", clear_on_submit=True):
@@ -286,7 +306,7 @@ def render_region_dashboard(region_name):
                 input_name = c2.text_input("아파트명")
                 if st.form_submit_button("추가"):
                     if input_name:
-                        full_name = get_inferred_apt_name(raw_for_infer, input_name, input_dong)
+                        full_name = get_inferred_apt_name(raw_data, input_name, input_dong)
                         if full_name != input_name: st.toast(f"💡 '{full_name}' 보정됨")
                         curr_df = load_my_apts()
                         cond = (curr_df['지역'] == region_name) & (curr_df['동'] == input_dong) & (curr_df['아파트명'] == full_name)
@@ -309,25 +329,67 @@ def render_region_dashboard(region_name):
     
     t1, t2, t3 = st.tabs(["🏢 아파트", "⛰️ 토지", "📰 지역 뉴스"])
 
+    # 1. 아파트 탭 (그래프 기능 추가)
     with t1:
-        if api_key_val:
-            sub_t1, sub_t2 = st.tabs(["♥ 관심 매물", "📋 전체 실거래"])
+        if api_key_val and raw_data:
+            df_all = pd.DataFrame(raw_data).sort_values(by="계약일", ascending=False)
+            
+            # --- 아파트 시세 집중 분석 섹션 ---
+            st.markdown("#### 📉 아파트 시세 집중 분석")
+            col_sel1, col_sel2 = st.columns(2)
+            
+            # 데이터에 존재하는 동/아파트만 필터링
+            available_dongs = sorted(df_all['동'].unique())
+            selected_dong = col_sel1.selectbox(f"동 선택 ({region_name})", available_dongs)
+            
+            available_apts = sorted(df_all[df_all['동'] == selected_dong]['아파트명'].unique())
+            selected_apt = col_sel2.selectbox(f"아파트 선택 ({region_name})", available_apts)
+            
+            if selected_apt:
+                # 선택된 아파트 데이터 필터링
+                target_df = df_all[(df_all['동'] == selected_dong) & (df_all['아파트명'] == selected_apt)].sort_values(by="계약일")
+                
+                if not target_df.empty:
+                    # 요약 통계
+                    max_price = target_df['국토부 실거래가'].max()
+                    avg_price = target_df['국토부 실거래가'].mean()
+                    recent_price = target_df.iloc[-1]['국토부 실거래가']
+                    
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("최고 실거래가", f"{max_price:,} 만원")
+                    m2.metric("기간 내 평균가", f"{int(avg_price):,} 만원")
+                    m3.metric("최근 거래가", f"{recent_price:,} 만원", delta_color="off")
+                    
+                    # 그래프 그리기
+                    st.caption(f"📊 {selected_apt} 최근 거래 추이")
+                    plot_apt_trend(target_df)
+                else:
+                    st.warning("해당 아파트의 최근 거래 내역이 없습니다.")
+            
+            st.divider()
+
+            # --- 기존 탭 (관심/전체) ---
+            sub_t1, sub_t2 = st.tabs(["♥ 관심 매물 모아보기", "📋 전체 실거래 내역"])
+            
             with sub_t1:
-                df_interest = get_interest_data(raw_for_infer, my_df, region_name)
+                df_interest = get_interest_data(raw_data, my_df, region_name)
                 if not df_interest.empty:
                     df_interest['kb_link'] = df_interest.apply(lambda x: get_links(region_name, x['동'], x['아파트명'])['kb'] if x['아파트명'] != '-' else '-', axis=1)
                     df_interest['naver_link'] = df_interest.apply(lambda x: get_links(region_name, x['동'], x['아파트명'])['naver'] if x['아파트명'] != '-' else '-', axis=1)
                     st.dataframe(df_interest, column_config=common_config, column_order=["계약일", "동", "아파트명", "면적", "국토부 실거래가", "kb_link", "naver_link"], hide_index=True, use_container_width=True)
                 else: st.info("관심 매물 거래가 없습니다.")
+            
             with sub_t2:
-                if raw_for_infer:
-                    df_all = pd.DataFrame(raw_for_infer).sort_values(by="계약일", ascending=False)
-                    df_all['kb_link'] = df_all.apply(lambda x: get_links(region_name, x['동'], x['아파트명'])['kb'], axis=1)
-                    df_all['naver_link'] = df_all.apply(lambda x: get_links(region_name, x['동'], x['아파트명'])['naver'], axis=1)
-                    st.dataframe(df_all, column_config=common_config, column_order=["계약일", "동", "아파트명", "면적", "국토부 실거래가", "kb_link", "naver_link"], hide_index=True, use_container_width=True)
-                else: st.info("데이터가 없습니다.")
-        else: st.warning("공공데이터 API 키가 필요합니다.")
+                df_all['kb_link'] = df_all.apply(lambda x: get_links(region_name, x['동'], x['아파트명'])['kb'], axis=1)
+                df_all['naver_link'] = df_all.apply(lambda x: get_links(region_name, x['동'], x['아파트명'])['naver'], axis=1)
+                st.dataframe(df_all, column_config=common_config, column_order=["계약일", "동", "아파트명", "면적", "국토부 실거래가", "kb_link", "naver_link"], hide_index=True, use_container_width=True)
+        
+        elif not api_key_val:
+            st.warning("API 키가 필요합니다.")
+        else:
+            st.info("데이터를 불러오는 중이거나 데이터가 없습니다.")
 
+    # 2. 토지 탭
     with t2:
         if api_key_val:
             l_raw = get_land_data_api(api_key_val, r_code)
@@ -353,13 +415,14 @@ def render_region_dashboard(region_name):
                     df_l_all['naver_link'] = df_l_all.apply(lambda x: get_links(region_name, x['동'], x['아파트명'], True)['naver'], axis=1)
                     st.dataframe(df_l_all, column_config=land_config, column_order=["계약일", "동", "아파트명", "면적", "국토부 실거래가", "kb_link", "naver_link"], hide_index=True, use_container_width=True)
                 else: st.info("데이터가 없습니다.")
-        else: st.warning("공공데이터 API 키가 필요합니다.")
+        else: st.warning("API 키가 필요합니다.")
 
+    # 3. 뉴스 탭
     with t3:
         st.subheader(f"📰 {region_name} 주요 소식")
         
         if not naver_id or not naver_secret:
-            st.warning("네이버 API Key가 필요합니다.")
+            st.warning("왼쪽 사이드바에 '네이버 API Key'를 입력해야 뉴스가 보입니다.")
         else:
             nt1, nt2 = st.tabs(["🏠 부동산", "📑 일반/통합"])
             def create_news_tabs(cat_name):
