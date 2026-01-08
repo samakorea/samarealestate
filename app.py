@@ -10,7 +10,7 @@ import time
 import os
 from difflib import get_close_matches
 import re
-import altair as alt # 그래프 그리기용 라이브러리
+import altair as alt
 
 # -----------------------------------------------------------------------------
 # 1. 화면 디자인 및 설정
@@ -109,8 +109,11 @@ def get_apt_data_api(api_key, region_code):
                 for item in root.findall('.//item'):
                     try:
                         price = int(item.findtext('dealAmount').strip().replace(',', ''))
+                        # ★ 날짜 포맷 변경: YYYY.MM.DD
+                        date_str = f"{item.findtext('dealYear')}.{item.findtext('dealMonth').zfill(2)}.{item.findtext('dealDay').zfill(2)}"
+                        
                         all_data.append({
-                            '계약일': f"{item.findtext('dealYear')}-{item.findtext('dealMonth').zfill(2)}-{item.findtext('dealDay').zfill(2)}",
+                            '계약일': date_str,
                             '동': item.findtext('umdNm').strip(),
                             '아파트명': item.findtext('aptNm').strip(),
                             '면적': float(item.findtext('excluUseAr')),
@@ -138,8 +141,11 @@ def get_land_data_api(api_key, region_code):
                 for item in root.findall('.//item'):
                     try:
                         price = int(item.findtext('dealAmount').strip().replace(',', ''))
+                        # ★ 날짜 포맷 변경: YYYY.MM.DD
+                        date_str = f"{item.findtext('dealYear')}.{item.findtext('dealMonth').zfill(2)}.{item.findtext('dealDay').zfill(2)}"
+                        
                         all_data.append({
-                            '계약일': f"{item.findtext('dealYear')}-{item.findtext('dealMonth').zfill(2)}-{item.findtext('dealDay').zfill(2)}",
+                            '계약일': date_str,
                             '동': item.findtext('umdNm').strip(),
                             '아파트명': item.findtext('jimok'), 
                             '면적': float(item.findtext('dealArea')),
@@ -177,7 +183,9 @@ def get_interest_data(api_list, my_df, current_region):
             })
     df_final = pd.concat([df_interest, pd.DataFrame(dummy_rows)], ignore_index=True)
     if df_final.empty: return pd.DataFrame()
-    df_final['sort_date'] = df_final['계약일'].apply(lambda x: '9999-99-99' if x == '-' else x)
+    
+    # 정렬용 날짜 포맷도 점(.)으로 변경
+    df_final['sort_date'] = df_final['계약일'].apply(lambda x: '9999.99.99' if x == '-' else x)
     return df_final.sort_values(by=['sort_date', '동'], ascending=[False, True]).drop(columns=['sort_date'])
 
 def get_inferred_apt_name(api_data, input_name, input_dong):
@@ -186,24 +194,21 @@ def get_inferred_apt_name(api_data, input_name, input_dong):
     matches = get_close_matches(input_name, dong_apts, n=1, cutoff=0.2)
     return matches[0] if matches else input_name
 
-# ★ 그래프 그리기 함수 (Altair 사용) ★
 def plot_apt_trend(df_apt):
     if df_apt.empty:
         st.info("데이터가 부족하여 그래프를 그릴 수 없습니다.")
         return
 
-    # 날짜 형식 변환
     df_apt = df_apt.copy()
-    df_apt['계약일'] = pd.to_datetime(df_apt['계약일'])
+    # 날짜 파싱 (점 구분자 처리)
+    df_apt['계약일'] = pd.to_datetime(df_apt['계약일'], format='%Y.%m.%d', errors='coerce')
     
-    # Altair 차트 생성
     base = alt.Chart(df_apt).encode(
-        x=alt.X('계약일:T', title='계약일'),
+        x=alt.X('계약일:T', title='계약일', axis=alt.Axis(format='%Y.%m.%d')), # 축 포맷도 변경
         y=alt.Y('국토부 실거래가:Q', title='거래금액(만원)', scale=alt.Scale(zero=False)),
-        tooltip=['계약일', '국토부 실거래가', '면적']
+        tooltip=[alt.Tooltip('계약일', format='%Y.%m.%d'), '국토부 실거래가', '면적']
     )
     
-    # 선 그래프 + 점 그래프 결합
     line = base.mark_line(color='#FF4B4B')
     points = base.mark_circle(size=60, color='#FF4B4B')
     
@@ -231,22 +236,27 @@ def get_naver_news_list(client_id, client_secret, region_name, category, publish
         if res.status_code == 200:
             items = res.json().get('items', [])
             news = []
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now().strftime("%Y-%m-%d") # 비교용 오늘 날짜
             for item in items:
                 link = item['link']
                 originallink = item.get('originallink', '')
                 if domain_key != "ALL":
                     if (domain_key not in link) and (domain_key not in originallink): continue
                 try:
+                    # 뉴스 날짜 포맷 변경: YYYY.MM.DD
                     pub_date = datetime.strptime(item['pubDate'], "%a, %d %b %Y %H:%M:%S +0900")
-                    date_str = pub_date.strftime("%Y-%m-%d")
-                except: date_str = item['pubDate']
+                    date_str = pub_date.strftime("%Y.%m.%d")
+                    # 오늘 날짜 비교를 위해 YYYY-MM-DD 포맷도 잠시 사용
+                    compare_date = pub_date.strftime("%Y-%m-%d")
+                except: 
+                    date_str = item['pubDate']
+                    compare_date = date_str
                 
                 news.append({
                     'title': clean_html(item['title']),
                     'link': originallink if originallink else link,
                     'date_str': date_str,
-                    'is_today': date_str == today,
+                    'is_today': compare_date == today,
                     'source': publisher_name
                 })
             return news[:20]
@@ -329,16 +339,14 @@ def render_region_dashboard(region_name):
     
     t1, t2, t3 = st.tabs(["🏢 아파트", "⛰️ 토지", "📰 지역 뉴스"])
 
-    # 1. 아파트 탭 (그래프 기능 추가)
+    # 1. 아파트 탭
     with t1:
         if api_key_val and raw_data:
             df_all = pd.DataFrame(raw_data).sort_values(by="계약일", ascending=False)
             
-            # --- 아파트 시세 집중 분석 섹션 ---
             st.markdown("#### 📉 아파트 시세 집중 분석")
             col_sel1, col_sel2 = st.columns(2)
             
-            # 데이터에 존재하는 동/아파트만 필터링
             available_dongs = sorted(df_all['동'].unique())
             selected_dong = col_sel1.selectbox(f"동 선택 ({region_name})", available_dongs)
             
@@ -346,11 +354,9 @@ def render_region_dashboard(region_name):
             selected_apt = col_sel2.selectbox(f"아파트 선택 ({region_name})", available_apts)
             
             if selected_apt:
-                # 선택된 아파트 데이터 필터링
                 target_df = df_all[(df_all['동'] == selected_dong) & (df_all['아파트명'] == selected_apt)].sort_values(by="계약일")
                 
                 if not target_df.empty:
-                    # 요약 통계
                     max_price = target_df['국토부 실거래가'].max()
                     avg_price = target_df['국토부 실거래가'].mean()
                     recent_price = target_df.iloc[-1]['국토부 실거래가']
@@ -360,7 +366,6 @@ def render_region_dashboard(region_name):
                     m2.metric("기간 내 평균가", f"{int(avg_price):,} 만원")
                     m3.metric("최근 거래가", f"{recent_price:,} 만원", delta_color="off")
                     
-                    # 그래프 그리기
                     st.caption(f"📊 {selected_apt} 최근 거래 추이")
                     plot_apt_trend(target_df)
                 else:
@@ -368,7 +373,6 @@ def render_region_dashboard(region_name):
             
             st.divider()
 
-            # --- 기존 탭 (관심/전체) ---
             sub_t1, sub_t2 = st.tabs(["♥ 관심 매물 모아보기", "📋 전체 실거래 내역"])
             
             with sub_t1:
